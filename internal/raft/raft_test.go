@@ -2,6 +2,7 @@ package raft
 
 import (
 	"testing"
+	"time"
 )
 
 // TestInitialState verifies that a newly instantiated Raft node conforms
@@ -104,4 +105,89 @@ func TestFSMTransitions(t *testing.T) {
 	if rf.votedFor != -1 {
 		t.Fatalf("expected votedFor == -1, got %d", rf.votedFor)
 	}
+}
+
+// TestApplyLoopDecoupledExecution verifies:
+// 1. applyLoop monitors commitIndex > lastApplied.
+// 2. Automatically increments lastApplied.
+// 3. Emits ApplyMsg sequentially across applyCh without holding the mutex.
+func TestApplyLoopDecoupledExecution(t *testing.T) {
+	applyCh := make(chan ApplyMsg, 10)
+	rf := NewRaft(0, 3, applyCh)
+
+	// Add 3 log entries: index 1, 2, 3
+	rf.mu.Lock()
+	rf.log = append(rf.log,
+		LogEntry{Index: 1, Term: 1, Command: "cmd1"},
+		LogEntry{Index: 2, Term: 1, Command: "cmd2"},
+		LogEntry{Index: 3, Term: 1, Command: "cmd3"},
+	)
+	rf.mu.Unlock()
+
+	// Start Raft node (spawns run and applyLoop)
+	rf.Start()
+	defer rf.Stop()
+
+	// Advance commitIndex to 2 under lock and broadcast condition
+	rf.mu.Lock()
+	rf.commitIndex = 2
+	rf.applyCond.Broadcast()
+	rf.mu.Unlock()
+
+	// Verify that applyCh receives cmd1 and cmd2 in strict order
+	expected := []struct {
+		index   int
+		command any
+	}{
+		{index: 1, command: "cmd1"},
+		{index: 2, command: "cmd2"},
+	}
+
+	for _, exp := range expected {
+		select {
+		case msg := <-applyCh:
+			if !msg.CommandValid {
+				t.Fatalf("expected CommandValid == true")
+			}
+			if msg.CommandIndex != exp.index {
+				t.Fatalf("expected CommandIndex %d, got %d", exp.index, msg.CommandIndex)
+			}
+			if msg.Command != exp.command {
+				t.Fatalf("expected Command %v, got %v", exp.command, msg.Command)
+			}
+		case <-time.After(500 * time.Millisecond):
+			t.Fatalf("timed out waiting for applyMsg for index %d", exp.index)
+		}
+	}
+
+	// Verify lastApplied has advanced to 2
+	time.Sleep(50 * time.Millisecond)
+	rf.mu.Lock()
+	if rf.lastApplied != 2 {
+		t.Fatalf("expected lastApplied == 2, got %d", rf.lastApplied)
+	}
+	rf.mu.Unlock()
+
+	// Now advance commitIndex to 3
+	rf.mu.Lock()
+	rf.commitIndex = 3
+	rf.applyCond.Broadcast()
+	rf.mu.Unlock()
+
+	// Expect cmd3
+	select {
+	case msg := <-applyCh:
+		if msg.CommandIndex != 3 || msg.Command != "cmd3" {
+			t.Fatalf("unexpected msg: %+v", msg)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatalf("timed out waiting for applyMsg for index 3")
+	}
+
+	time.Sleep(50 * time.Millisecond)
+	rf.mu.Lock()
+	if rf.lastApplied != 3 {
+		t.Fatalf("expected lastApplied == 3, got %d", rf.lastApplied)
+	}
+	rf.mu.Unlock()
 }

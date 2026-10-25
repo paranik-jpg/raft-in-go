@@ -98,6 +98,9 @@ type Raft struct {
 	// In production, peers[i] invokes an RPC client. In tests, it routes directly.
 	peers []*Raft
 
+	// netMatrix optionally intercepts RPCs for chaos and network partition simulation.
+	netMatrix *NetworkMatrix
+
 	// =========================================================================
 	// CONCURRENCY & LIFECYCLE CHANNELS
 	// =========================================================================
@@ -115,6 +118,21 @@ type Raft struct {
 	// winElectionCh signals that the candidate successfully collected a majority of votes.
 	// To break out of the election wait loop and immediately step up as the Leader.
 	winElectionCh chan struct{}
+
+	// applyCh is the internal channel across which committed entries are emitted
+	// to the decoupled application / state machine.
+	applyCh chan ApplyMsg
+
+	// applyCond is the condition variable used to wake up applyLoop when commitIndex advances.
+	applyCond *sync.Cond
+}
+
+// ApplyMsg is the payload sent across applyCh to the state machine whenever
+// a log entry is safely committed by quorum.
+type ApplyMsg struct {
+	CommandValid bool // True if this message contains a normal replicated command.
+	Command      any  // Application-level command to apply to the state machine.
+	CommandIndex int  // 1-based log position where command was committed.
 }
 
 // =============================================================================
@@ -171,11 +189,60 @@ func (rf *Raft) GetRole() NodeRole {
 	return rf.role
 }
 
+// StartCommand proposes a new client command to be appended to the leader's log
+// and replicated across the cluster.
+// Returns:
+// - index: 1-based log position where the entry was appended.
+// - term: current term when the command was received.
+// - isLeader: true if this server believes it is the leader; false otherwise.
+func (rf *Raft) StartCommand(command any) (int, int, bool) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	if rf.role != RoleLeader {
+		return -1, -1, false
+	}
+
+	index := rf.getLastLogIndex() + 1
+	term := rf.currentTerm
+
+	entry := LogEntry{
+		Index:   index,
+		Term:    term,
+		Command: command,
+	}
+	rf.log = append(rf.log, entry)
+
+	// Leader immediately matches its own appended entry
+	if rf.me < len(rf.matchIndex) {
+		rf.matchIndex[rf.me] = index
+	}
+
+	// Trigger replication to peers immediately
+	go rf.sendHeartbeats()
+
+	return index, term, true
+}
+
 // GetCurrentTerm returns the current term of the node (thread-safe).
 func (rf *Raft) GetCurrentTerm() int {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	return rf.currentTerm
+}
+
+// GetCommitIndex returns the current commitIndex (thread-safe).
+func (rf *Raft) GetCommitIndex() int {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	return rf.commitIndex
+}
+
+// GetLastApplied returns the current lastApplied (thread-safe).
+func (rf *Raft) GetLastApplied() int {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	return rf.lastApplied
 }
 
 // SetPeers configures the peer instances for RPC communication.
@@ -184,6 +251,13 @@ func (rf *Raft) SetPeers(peers []*Raft) {
 	defer rf.mu.Unlock()
 	rf.peers = peers
 	rf.peersCount = len(peers)
+}
+
+// SetNetworkMatrix attaches a simulated network switch to this node.
+func (rf *Raft) SetNetworkMatrix(nm *NetworkMatrix) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	rf.netMatrix = nm
 }
 
 // Stop safely shuts down the Raft node lifecycle loop.
@@ -196,10 +270,72 @@ func (rf *Raft) Stop() {
 		return
 	default:
 		close(rf.stopCh)
+		// Wake up applyCond in case applyLoop is waiting so it can exit cleanly
+		if rf.applyCond != nil {
+			rf.applyCond.Broadcast()
+		}
 	}
 }
 
-// sendSignal sends a non-blocking notification on a channel.
+// Start begins the background event loops for the Raft node.
+func (rf *Raft) Start() {
+	go rf.run()
+	go rf.applyLoop()
+}
+
+// applyLoop is the decoupled application routine monitoring commitIndex > lastApplied.
+// Whenever commitIndex advances beyond lastApplied, it retrieves the newly committed entries,
+// releases rf.mu to avoid deadlocking or blocking consensus, and emits ApplyMsg instances
+// sequentially across applyCh to the Replicated KV state store.
+func (rf *Raft) applyLoop() {
+	for {
+		rf.mu.Lock()
+
+		// Sleep while no entries are ready to apply and node is not stopped
+		for rf.commitIndex <= rf.lastApplied {
+			select {
+			case <-rf.stopCh:
+				rf.mu.Unlock()
+				return
+			default:
+			}
+			rf.applyCond.Wait()
+		}
+
+		select {
+		case <-rf.stopCh:
+			rf.mu.Unlock()
+			return
+		default:
+		}
+
+		// Snapshot committed entries that need to be applied
+		start := rf.lastApplied + 1
+		end := rf.commitIndex
+		entriesToApply := make([]LogEntry, end-start+1)
+		copy(entriesToApply, rf.log[start:end+1])
+
+		// Update lastApplied before unlocking
+		rf.lastApplied = end
+		// Wake up any goroutine waiting on lastApplied >= readIndex in ReadIndex()
+		rf.applyCond.Broadcast()
+		rf.mu.Unlock()
+
+		// Emit ApplyMsg across applyCh outside the lock
+		for _, entry := range entriesToApply {
+			select {
+			case <-rf.stopCh:
+				return
+			case rf.applyCh <- ApplyMsg{
+				CommandValid: true,
+				Command:      entry.Command,
+				CommandIndex: entry.Index,
+			}:
+			}
+		}
+	}
+}
+
 // Non-blocking avoids deadlocking if the receiver isn't currently selecting on the channel.
 func sendSignal(ch chan struct{}) {
 	select {
@@ -209,7 +345,15 @@ func sendSignal(ch chan struct{}) {
 }
 
 // NewRaft creates and initializes the foundational state for a Raft node.
-func NewRaft(me int, peersCount int) *Raft {
+// applyCh is provided by the upper-layer replicated key-value state store.
+func NewRaft(me int, peersCount int, applyCh ...chan ApplyMsg) *Raft {
+	var ch chan ApplyMsg
+	if len(applyCh) > 0 && applyCh[0] != nil {
+		ch = applyCh[0]
+	} else {
+		ch = make(chan ApplyMsg, 100)
+	}
+
 	rf := &Raft{
 		me:            me,
 		peersCount:    peersCount,
@@ -224,6 +368,7 @@ func NewRaft(me int, peersCount int) *Raft {
 		heartbeatCh:   make(chan struct{}, 1),
 		grantVoteCh:   make(chan struct{}, 1),
 		winElectionCh: make(chan struct{}, 1),
+		applyCh:       ch,
 		log: []LogEntry{
 			{
 				Index:   0,
@@ -232,6 +377,12 @@ func NewRaft(me int, peersCount int) *Raft {
 			},
 		},
 	}
+
+	// When applyLoop calls rf.applyCond.Wait():
+	// 1. It automatically releases rf.mu.
+	// 2. It suspends (pauses) the applyLoop goroutine.
+	// 3. When Broadcast() is called later by checkAndUpdateCommitIndex or AppendEntries, applyCond.Wait() wakes up and automatically re-acquires rf.mu before continuing!
+	rf.applyCond = sync.NewCond(&rf.mu)
 
 	return rf
 }

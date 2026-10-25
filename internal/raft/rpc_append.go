@@ -1,5 +1,10 @@
 package raft
 
+import (
+	"sync"
+	"time"
+)
+
 // AppendEntriesArgs defines the arguments sent by the leader for heartbeats and replication.
 // Corresponds strictly to Raft §5.2 and §5.3.
 type AppendEntriesArgs struct {
@@ -60,18 +65,22 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	lastLogIndex := rf.getLastLogIndex()
 
 	// Case 3a: Receiver's log is too short (does not contain PrevLogIndex)
+	// ConflictIndex = lastLogIndex + 1 (len of log in 1-based indexing)
+	// ConflictTerm = 0 (no term present)
 	if args.PrevLogIndex > lastLogIndex {
-		reply.ConflictTerm = -1
-		// The leader jumps straight to where our log ends.
-		reply.ConflictIndex = len(rf.log) // First missing index
+		reply.ConflictTerm = 0
+		// "The follower's log ended at lastLogIndex.
+		// So the very first missing index where the follower needs data is lastLogIndex + 1!"
+		reply.ConflictIndex = lastLogIndex + 1
 		return
 	}
 
 	// Case 3b: Receiver has entry at PrevLogIndex, but term mismatches
+	// ConflictTerm = log[PrevLogIndex].Term
+	// ConflictIndex = first index in follower log holding ConflictTerm
 	if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
 		reply.ConflictTerm = rf.log[args.PrevLogIndex].Term
 		// Scan backward to find the earliest index for this conflicting term
-		// Find the very first index of that conflicting term
 		for idx := args.PrevLogIndex; idx >= 1; idx-- {
 			if rf.log[idx].Term == reply.ConflictTerm {
 				reply.ConflictIndex = idx
@@ -112,6 +121,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.LeaderCommit > rf.commitIndex {
 		lastNewEntryIndex := args.PrevLogIndex + len(args.Entries)
 		rf.commitIndex = min(args.LeaderCommit, lastNewEntryIndex)
+		// Wake up applyLoop to deliver newly committed entries to state machine
+		if rf.applyCond != nil {
+			// Instantly wake up applyLoop
+			rf.applyCond.Broadcast()
+		}
 	}
 
 	reply.Success = true
@@ -153,18 +167,169 @@ func (rf *Raft) checkAndUpdateCommitIndex() {
 		// If stored on a majority quorum, advance commitIndex to N
 		if count >= quorum {
 			rf.commitIndex = N
+			// Wake up applyLoop to deliver newly committed entries to state machine
+			if rf.applyCond != nil {
+				// Instantly wake up applyLoop
+				rf.applyCond.Broadcast()
+			}
 			break
 		}
 	}
 }
 
 // sendAppendEntries dispatches an AppendEntries RPC to the specified peer.
+// If a NetworkMatrix is configured, it routes through the simulator switch.
 func (rf *Raft) sendAppendEntries(peer int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	rf.mu.Lock()
+	netMatrix := rf.netMatrix
+	from := rf.me
 	if peer < 0 || peer >= len(rf.peers) || rf.peers[peer] == nil {
+		rf.mu.Unlock()
 		return false
 	}
-	rf.peers[peer].AppendEntries(args, reply)
+	targetPeer := rf.peers[peer]
+	rf.mu.Unlock()
+
+	if netMatrix != nil {
+		return netMatrix.CallAppendEntries(from, peer, args, reply)
+	}
+
+	targetPeer.AppendEntries(args, reply)
 	return true
+}
+
+// sendHeartbeatRound sends an immediate round of empty AppendEntries heartbeats to all peers
+// and blocks until either a majority confirms or it fails to achieve quorum.
+// Used by the ReadIndex protocol (§8) to verify leadership authority before serving reads.
+func (rf *Raft) sendHeartbeatRound() bool {
+	rf.mu.Lock()
+	if rf.role != RoleLeader {
+		rf.mu.Unlock()
+		return false
+	}
+	term := rf.currentTerm
+	leaderID := rf.me
+	leaderCommit := rf.commitIndex
+	peersCount := rf.peersCount
+	quorum := (peersCount / 2) + 1
+	rf.mu.Unlock()
+
+	// If single-node cluster, we already constitute a majority
+	if peersCount == 1 {
+		return true
+	}
+
+	ackCount := 1 // Leader itself
+	var ackMu sync.Mutex
+	doneCh := make(chan bool, 1)
+
+	for peer := range peersCount {
+		if peer == leaderID {
+			continue
+		}
+
+		go func(p int) {
+			rf.mu.Lock()
+			if rf.role != RoleLeader || rf.currentTerm != term {
+				rf.mu.Unlock()
+				return
+			}
+			prevLogIndex := rf.nextIndex[p] - 1
+			prevLogTerm := rf.log[prevLogIndex].Term
+			rf.mu.Unlock()
+
+			args := &AppendEntriesArgs{
+				Term:         term,
+				LeaderID:     leaderID,
+				PrevLogIndex: prevLogIndex,
+				PrevLogTerm:  prevLogTerm,
+				Entries:      nil, // Zero entries
+				LeaderCommit: leaderCommit,
+			}
+			reply := &AppendEntriesReply{}
+
+			ok := rf.sendAppendEntries(p, args, reply)
+			if !ok {
+				return
+			}
+
+			rf.mu.Lock()
+			defer rf.mu.Unlock()
+
+			if rf.role != RoleLeader || rf.currentTerm != term {
+				return
+			}
+
+			if reply.Term > rf.currentTerm {
+				rf.becomeFollower(reply.Term)
+				return
+			}
+
+			if reply.Success {
+				ackMu.Lock()
+				ackCount++
+				if ackCount == quorum {
+					select {
+					case doneCh <- true:
+					default:
+					}
+				}
+				ackMu.Unlock()
+			}
+		}(peer)
+	}
+
+	// Wait for majority confirmation with a reasonable timeout
+	select {
+	case <-doneCh:
+		return true
+	case <-time.After(150 * time.Millisecond):
+		return false
+	case <-rf.stopCh:
+		return false
+	}
+}
+
+// ReadIndex executes the Raft Linearizable Read protocol (§8):
+// 1. Capture current commitIndex as readIndex.
+// 2. Send immediate heartbeat round to all peers and await majority confirmation.
+// 3. Once majority confirms leadership, wait until lastApplied >= readIndex.
+// 4. Returns readIndex and true if successful; (0, false) if not leader or partitioned.
+func (rf *Raft) ReadIndex() (int, bool) {
+	rf.mu.Lock()
+	if rf.role != RoleLeader {
+		rf.mu.Unlock()
+		return 0, false
+	}
+	// Step 1: Capture current commitIndex as readIndex
+	readIndex := rf.commitIndex
+	rf.mu.Unlock()
+
+	// Step 2: Send immediate heartbeat round and await majority confirmation
+	if !rf.sendHeartbeatRound() {
+		return 0, false
+	}
+
+	// Step 3: Wait until lastApplied >= readIndex
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	// Verify we are still leader in the same term
+	if rf.role != RoleLeader {
+		return 0, false
+	}
+
+	for rf.lastApplied < readIndex {
+		select {
+		case <-rf.stopCh:
+			return 0, false
+		default:
+		}
+		rf.applyCond.Wait()
+	}
+
+	// Step 4: Ready to read from state machine with linearizability guaranteed
+	return readIndex, true
 }
 
 // sendHeartbeats broadcasts an immediate empty AppendEntries RPC to all peers.
@@ -194,6 +359,14 @@ func (rf *Raft) sendHeartbeats() {
 			}
 			prevLogIndex := rf.nextIndex[p] - 1
 			prevLogTerm := rf.log[prevLogIndex].Term
+
+			// Package any log entries from nextIndex[p] onwards
+			var entries []LogEntry
+			if rf.getLastLogIndex() >= rf.nextIndex[p] {
+				// The leader has new log entries that peer p has not received yet!
+				entries = make([]LogEntry, len(rf.log[rf.nextIndex[p]:]))
+				copy(entries, rf.log[rf.nextIndex[p]:])
+			}
 			rf.mu.Unlock()
 
 			args := &AppendEntriesArgs{
@@ -201,7 +374,7 @@ func (rf *Raft) sendHeartbeats() {
 				LeaderID:     leaderID,
 				PrevLogIndex: prevLogIndex,
 				PrevLogTerm:  prevLogTerm,
-				Entries:      nil, // Empty slice for heartbeat
+				Entries:      entries, // Entries to replicate (nil/empty if pure heartbeat)
 				LeaderCommit: leaderCommit,
 			}
 			reply := &AppendEntriesReply{}
@@ -239,8 +412,8 @@ func (rf *Raft) sendHeartbeats() {
 				rf.checkAndUpdateCommitIndex()
 			} else {
 				// Consistency check failed: use fast recovery hints to update nextIndex
-				if reply.ConflictTerm == -1 {
-					// Follower log too short: jump directly to follower's log length
+				if reply.ConflictTerm == 0 {
+					// Follower log too short: jump directly to follower's log length + 1
 					rf.nextIndex[p] = reply.ConflictIndex
 				} else {
 					// Term mismatch: search if leader has an entry with ConflictTerm

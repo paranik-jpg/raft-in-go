@@ -77,13 +77,23 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 }
 
 // sendRequestVote dispatches a RequestVote RPC to the specified peer.
-// In this in-memory testable engine, it invokes peer.RequestVote directly.
-// In network configurations, it encodes over TCP/gRPC/RPC wire.
+// If a NetworkMatrix is configured, it routes through the simulator switch.
 func (rf *Raft) sendRequestVote(peer int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
+	rf.mu.Lock()
+	netMatrix := rf.netMatrix
+	from := rf.me
 	if peer < 0 || peer >= len(rf.peers) || rf.peers[peer] == nil {
+		rf.mu.Unlock()
 		return false
 	}
-	rf.peers[peer].RequestVote(args, reply)
+	targetPeer := rf.peers[peer]
+	rf.mu.Unlock()
+
+	if netMatrix != nil {
+		return netMatrix.CallRequestVote(from, peer, args, reply)
+	}
+
+	targetPeer.RequestVote(args, reply)
 	return true
 }
 

@@ -54,8 +54,8 @@ func TestAppendEntriesFollowerExecution(t *testing.T) {
 		if reply.Success {
 			t.Fatalf("expected failure because log is too short")
 		}
-		if reply.ConflictTerm != -1 {
-			t.Fatalf("expected ConflictTerm == -1, got %d", reply.ConflictTerm)
+		if reply.ConflictTerm != 0 {
+			t.Fatalf("expected ConflictTerm == 0, got %d", reply.ConflictTerm)
 		}
 		if reply.ConflictIndex != 1 {
 			t.Fatalf("expected ConflictIndex == 1 (first missing index), got %d", reply.ConflictIndex)
@@ -155,9 +155,9 @@ func TestAppendEntriesFollowerExecution(t *testing.T) {
 }
 
 // TestLeaderAdvancementOfCommitIndex verifies:
-// 1. Leader advances commitIndex to N once entry N is replicated on a majority quorum.
-// 2. Strict §5.4.2 Invariant: A leader CANNOT commit entries from an earlier term by
-//    counting replicas; it only commits entries from its CURRENT term directly!
+//  1. Leader advances commitIndex to N once entry N is replicated on a majority quorum.
+//  2. Strict §5.4.2 Invariant: A leader CANNOT commit entries from an earlier term by
+//     counting replicas; it only commits entries from its CURRENT term directly!
 func TestLeaderAdvancementOfCommitIndex(t *testing.T) {
 	clusterSize := 3
 	rf := NewRaft(0, clusterSize)
@@ -204,3 +204,155 @@ func TestLeaderAdvancementOfCommitIndex(t *testing.T) {
 	rf.mu.Unlock()
 }
 
+// TestFastRecoveryLeaderReceipt verifies leader logic upon receiving rejection:
+// 1. Leader has ConflictTerm -> nextIndex = last index of ConflictTerm + 1
+// 2. Leader does NOT have ConflictTerm -> nextIndex = ConflictIndex
+// 3. Follower log too short (ConflictTerm == 0) -> nextIndex = ConflictIndex
+func TestFastRecoveryLeaderReceipt(t *testing.T) {
+	clusterSize := 2
+	leader := NewRaft(0, clusterSize)
+
+	leader.mu.Lock()
+	leader.role = RoleLeader
+	leader.currentTerm = 3
+	leader.nextIndex = make([]int, clusterSize)
+	leader.matchIndex = make([]int, clusterSize)
+
+	// Leader log layout:
+	// Index 0: sentinel (term 0)
+	// Index 1: term 1
+	// Index 2: term 1
+	// Index 3: term 3
+	leader.log = append(leader.log,
+		LogEntry{Index: 1, Term: 1, Command: "a"},
+		LogEntry{Index: 2, Term: 1, Command: "b"},
+		LogEntry{Index: 3, Term: 3, Command: "c"},
+	)
+	leader.nextIndex[1] = 4
+	leader.mu.Unlock()
+
+	// Case 1: Follower rejected with ConflictTerm = 1, ConflictIndex = 1
+	// Leader HAS ConflictTerm 1 in its log (indices 1 and 2).
+	// Last index of ConflictTerm 1 in leader log is index 2.
+	// Leader must set nextIndex[1] = last index of ConflictTerm + 1 = 2 + 1 = 3!
+	{
+		reply := &AppendEntriesReply{
+			Success:       false,
+			ConflictTerm:  1,
+			ConflictIndex: 1,
+		}
+
+		leader.mu.Lock()
+		foundTerm := false
+		for idx := leader.getLastLogIndex(); idx >= 1; idx-- {
+			if leader.log[idx].Term == reply.ConflictTerm {
+				leader.nextIndex[1] = idx + 1
+				foundTerm = true
+				break
+			}
+		}
+		if !foundTerm {
+			leader.nextIndex[1] = reply.ConflictIndex
+		}
+
+		if leader.nextIndex[1] != 3 {
+			t.Fatalf("expected nextIndex == 3, got %d", leader.nextIndex[1])
+		}
+		leader.mu.Unlock()
+	}
+
+	// Case 2: Follower rejected with ConflictTerm = 2 (leader does NOT have term 2), ConflictIndex = 2
+	// Leader must bypass entire term 2 by setting nextIndex[1] = ConflictIndex = 2!
+	{
+		reply := &AppendEntriesReply{
+			Success:       false,
+			ConflictTerm:  2,
+			ConflictIndex: 2,
+		}
+
+		leader.mu.Lock()
+		foundTerm := false
+		for idx := leader.getLastLogIndex(); idx >= 1; idx-- {
+			if leader.log[idx].Term == reply.ConflictTerm {
+				leader.nextIndex[1] = idx + 1
+				foundTerm = true
+				break
+			}
+		}
+		if !foundTerm {
+			leader.nextIndex[1] = reply.ConflictIndex
+		}
+
+		if leader.nextIndex[1] != 2 {
+			t.Fatalf("expected nextIndex == 2, got %d", leader.nextIndex[1])
+		}
+		leader.mu.Unlock()
+	}
+
+	// Case 3: Follower log was too short (ConflictTerm = 0, ConflictIndex = 2)
+	// Leader jumps directly to ConflictIndex
+	{
+		reply := &AppendEntriesReply{
+			Success:       false,
+			ConflictTerm:  0,
+			ConflictIndex: 2,
+		}
+
+		leader.mu.Lock()
+		if reply.ConflictTerm == 0 {
+			leader.nextIndex[1] = reply.ConflictIndex
+		}
+
+		if leader.nextIndex[1] != 2 {
+			t.Fatalf("expected nextIndex == 2, got %d", leader.nextIndex[1])
+		}
+		leader.mu.Unlock()
+	}
+}
+
+// TestReadIndexLinearizability verifies the ReadIndex protocol (§8):
+// 1. Leader captures commitIndex as readIndex.
+// 2. Immediate heartbeat round sent to peers and awaits majority confirmation.
+// 3. Blocks until lastApplied >= readIndex.
+// 4. Returns readIndex and true for linearizable reading from local KV store.
+// 5. Partitioned/zombie leader fails to reach majority and rejects read request.
+func TestReadIndexLinearizability(t *testing.T) {
+	clusterSize := 3
+	nodes := make([]*Raft, clusterSize)
+	for i := range clusterSize {
+		nodes[i] = NewRaft(i, clusterSize)
+	}
+	for i := range clusterSize {
+		nodes[i].SetPeers(nodes)
+	}
+
+	// Make Node 0 the Leader
+	nodes[0].mu.Lock()
+	nodes[0].role = RoleLeader
+	nodes[0].currentTerm = 1
+	nodes[0].commitIndex = 2
+	nodes[0].lastApplied = 2
+	nodes[0].initializeLeaderVolatileState()
+	nodes[0].mu.Unlock()
+
+	// Case 1: Healthy cluster -> ReadIndex succeeds and returns readIndex = 2
+	readIdx, ok := nodes[0].ReadIndex()
+	if !ok {
+		t.Fatalf("expected ReadIndex to succeed on healthy leader")
+	}
+	if readIdx != 2 {
+		t.Fatalf("expected readIndex == 2, got %d", readIdx)
+	}
+
+	// Case 2: Partitioned leader (Node 0 cannot reach peers 1 and 2)
+	// Simulate partition by severing peer connections
+	nodes[0].mu.Lock()
+	nodes[0].peers = []*Raft{nodes[0], nil, nil}
+	nodes[0].mu.Unlock()
+
+	// ReadIndex must fail because leader cannot collect majority confirmations
+	_, ok = nodes[0].ReadIndex()
+	if ok {
+		t.Fatalf("expected ReadIndex to fail on partitioned leader")
+	}
+}

@@ -9,11 +9,6 @@ import (
 // MAIN EVENT-DRIVEN LIFECYCLE RUNNER
 // =============================================================================
 
-// Start begins the background event loop for the Raft node.
-func (rf *Raft) Start() {
-	go rf.run()
-}
-
 // run is the centralized event loop of a Raft node.
 // It constructs a continuous select loop over three primary drivers:
 //  1. electionTimer.C: Triggers conversion from Follower to Candidate, or
@@ -75,11 +70,14 @@ func (rf *Raft) run() {
 			rf.mu.Lock()
 			if rf.role == RoleCandidate {
 				rf.becomeLeader()
-				// Send immediate initial heartbeats upon winning election
-				rf.sendHeartbeats()
 				resetTimer(heartbeatTimer, HeartbeatInterval)
+				rf.mu.Unlock()
+
+				// Send immediate initial heartbeats upon winning election outside rf.mu!
+				rf.sendHeartbeats()
+			} else {
+				rf.mu.Unlock()
 			}
-			rf.mu.Unlock()
 		}
 	}
 }

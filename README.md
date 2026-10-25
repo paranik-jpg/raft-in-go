@@ -12,16 +12,22 @@ The consensus engine is decomposed into modular components following production 
 
 ```
 raft-in-go/
-├── raft/
-│   ├── raft.go            # Core Raft state, roles (Follower, Candidate, Leader), lifecycle & transitions
-│   ├── raft_test.go       # Persistent/volatile state invariant tests & role transition tests
-│   ├── log.go             # LogEntry struct, 1-indexed sentinel layout, log index & term helpers
-│   ├── event_loop.go      # Central run() event loop, timer drivers, safe timer resets
-│   ├── event_loop_test.go # Anti-split-vote randomized timeout tests & heartbeat reset tests
-│   ├── rpc_vote.go        # RequestVote RPC structs, handler, election restriction & parallel fan-out
-│   ├── rpc_vote_test.go   # Vote validation tests, parallel fan-out tests, election outcome tests
-│   ├── rpc_append.go      # AppendEntries RPC structs, heartbeat handler, leader broadcast
-│   └── rpc_append_test.go # (Upcoming) Log replication and consistency check tests
+├── internal/
+│   ├── raft/              # The Single Source of Truth Consensus Engine
+│   │   ├── raft.go            # Core Raft state, roles, Start/Stop, FSM transitions
+│   │   ├── raft_test.go       # Persistent/volatile state invariant tests
+│   │   ├── log.go             # LogEntry struct, 1-indexed sentinel layout & helpers
+│   │   ├── event_loop.go      # Central run() event loop, timer drivers, resetTimer
+│   │   ├── event_loop_test.go # Anti-split-vote randomized timeout & heartbeat tests
+│   │   ├── rpc_vote.go        # RequestVote RPC structs, handler, election restriction & parallel fan-out
+│   │   ├── rpc_vote_test.go   # Vote validation, parallel fan-out, and election outcome tests
+│   │   ├── rpc_append.go      # AppendEntries RPC, fast recovery, commit quorum, ReadIndex
+│   │   ├── rpc_append_test.go # AppendEntries receiver tests, §5.4.2 invariant tests, ReadIndex tests
+│   │   ├── network_matrix.go  # Chaos network switch (partitions, delay, packet drops)
+│   │   ├── network_matrix_test.go # Network switch topology manipulation tests
+│   │   └── chaos_test.go      # Empirical Jepsen-style partition and reconciliation chaos tests
+│   ├── network/           # Decoupled RPC wire protocols and simulation contracts
+│   └── storage/           # Durable state and log storage interfaces
 ├── .gitignore
 ├── go.mod
 ├── LICENSE                # MIT License
@@ -75,9 +81,21 @@ This implementation maintains strict safety guarantees:
   - `AppendEntriesArgs` and `AppendEntriesReply` wire protocols.
   - Recognition of valid leaders, candidate demotion, and heartbeat timer resets.
   - Parallel heartbeat dispatching from leader.
-- [ ] **Milestone 6: Log Replication & Consistency Backtracking** *(Next)*
-- [ ] **Milestone 7: State Machine Application (`applyCh`) & Commit Quorum**
-- [ ] **Milestone 8: Replicated Key-Value Store (`Put`, `Append`, `Get`)**
+- [x] **Milestone 6: Log Replication & Consistency Backtracking**
+  - Follower receiver execution rules (1 through 5).
+  - Fast recovery optimization (`ConflictTerm`, `ConflictIndex`) dropping backtracking from $O(\text{entries})$ to $O(\text{terms})$.
+  - Safe conflict truncation and splicing (protecting committed prefixes).
+- [x] **Milestone 7: State Machine Application (`applyCh`) & Commit Invariants**
+  - Decoupled asynchronous `applyLoop` worker with `sync.Cond` condition variable.
+  - Non-blocking state machine dispatch across `applyCh` outside mutex locks.
+  - Strict Raft §5.4.2 Figure 8 Leader Commit Invariant (leaders only commit entries from current term directly).
+  - Linearizable `ReadIndex` protocol (§8) preventing stale reads from partitioned zombie leaders.
+- [x] **Milestone 8: Jepsen-Style Chaos & Partition Simulator Framework**
+  - Programmable virtual network switch (`NetworkMatrix` / `SimulatedNetwork`).
+  - Dynamic partition manipulation (`Partition(groupA, groupB)` and `Heal()`).
+  - Empirical verification of Majority Partitions and Reconciliation Healing (Tests A & B).
+- [ ] **Milestone 9: Replicated Fault-Tolerant Key-Value Store (`kvraft`)** *(Next)*
+- [ ] **Milestone 10: Persistent WAL / State Compaction & Snapshotting**
 
 ---
 
@@ -86,12 +104,15 @@ This implementation maintains strict safety guarantees:
 All tests are verified with the Go race detector enabled:
 
 ```bash
-# Run all tests with race detector
-go test -v -race ./raft/...
+# Run all tests across the entire repository with race detector
+go test -v -race ./...
 
-# Run specific test suites
-go test -v -race ./raft -run TestRequestVoteValidation
-go test -v -race ./raft -run TestParallelVoteFanOut
+# Run the Jepsen-style Chaos & Partition suite
+go test -v -race ./internal/raft -run TestChaosPartitionAndHealing
+
+# Run specific unit test suites
+go test -v -race ./internal/raft -run TestRequestVoteValidation
+go test -v -race ./internal/raft -run TestReadIndexLinearizability
 ```
 
 ---
@@ -99,4 +120,3 @@ go test -v -race ./raft -run TestParallelVoteFanOut
 ## License
 
 This project is licensed under the [MIT License](LICENSE).
-
