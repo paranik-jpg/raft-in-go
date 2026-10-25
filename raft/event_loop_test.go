@@ -10,7 +10,7 @@ import (
 func TestTimerRange(t *testing.T) {
 	rf := NewRaft(0, 3)
 
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		timeout := rf.getElectionTimeout()
 		if timeout < MinElectionTimeout || timeout >= MaxElectionTimeout {
 			t.Fatalf("timeout %v out of bounds [%v, %v)", timeout, MinElectionTimeout, MaxElectionTimeout)
@@ -45,7 +45,7 @@ func TestFollowerResetsOnHeartbeat(t *testing.T) {
 
 	// Send heartbeats every 40ms for 300ms total.
 	// Since 40ms < MinElectionTimeout (150ms), the follower must remain a Follower.
-	for i := 0; i < 7; i++ {
+	for range 7 {
 		time.Sleep(40 * time.Millisecond)
 		sendSignal(rf.heartbeatCh)
 	}
@@ -57,4 +57,3 @@ func TestFollowerResetsOnHeartbeat(t *testing.T) {
 		t.Fatalf("expected term 0, got %d", rf.GetCurrentTerm())
 	}
 }
-

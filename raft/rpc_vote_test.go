@@ -124,10 +124,10 @@ func TestRequestVoteValidation(t *testing.T) {
 func TestParallelVoteFanOut(t *testing.T) {
 	clusterSize := 3
 	nodes := make([]*Raft, clusterSize)
-	for i := 0; i < clusterSize; i++ {
+	for i := range clusterSize {
 		nodes[i] = NewRaft(i, clusterSize)
 	}
-	for i := 0; i < clusterSize; i++ {
+	for i := range clusterSize {
 		nodes[i].SetPeers(nodes)
 	}
 
@@ -223,7 +223,7 @@ func TestVoteEvaluationOutcomes(t *testing.T) {
 			t.Fatalf("expected RoleLeader")
 		}
 		// nextIndex must be initialized to lastLogIndex + 1 = 1
-		for p := 0; p < 3; p++ {
+		for p := range 3 {
 			if rf.nextIndex[p] != 1 {
 				t.Fatalf("expected nextIndex[%d] == 1, got %d", p, rf.nextIndex[p])
 			}
@@ -233,4 +233,3 @@ func TestVoteEvaluationOutcomes(t *testing.T) {
 		}
 	}
 }
-
