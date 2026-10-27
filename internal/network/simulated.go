@@ -7,10 +7,11 @@ import (
 )
 
 // RPCEndpoint represents a callable Raft node endpoint capable of handling
-// RequestVote and AppendEntries RPC calls.
+// RequestVote, AppendEntries, and InstallSnapshot RPC calls.
 type RPCEndpoint interface {
 	RequestVote(args *RequestVoteArgs, reply *RequestVoteReply)
 	AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply)
+	InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply)
 }
 
 // NetworkSwitch is the simulated network switch interface supporting chaos injection.
@@ -22,6 +23,7 @@ type NetworkSwitch interface {
 	DropPercentage(rate float64)
 	CallRequestVote(from, to int, args *RequestVoteArgs, reply *RequestVoteReply) bool
 	CallAppendEntries(from, to int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool
+	CallInstallSnapshot(from, to int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) bool
 }
 
 // SimulatedNetwork implements NetworkSwitch in-memory for testing and chaos simulation.
@@ -181,3 +183,27 @@ func (sn *SimulatedNetwork) CallAppendEntries(from, to int, args *AppendEntriesA
 	target.AppendEntries(args, reply)
 	return sn.shouldDeliver(to, from)
 }
+
+// CallInstallSnapshot delivers an InstallSnapshot RPC through the simulated network switch.
+func (sn *SimulatedNetwork) CallInstallSnapshot(from, to int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) bool {
+	if !sn.shouldDeliver(from, to) {
+		return false
+	}
+
+	sn.mu.RLock()
+	delay := sn.delay
+	target := sn.endpoints[to]
+	sn.mu.RUnlock()
+
+	if target == nil {
+		return false
+	}
+
+	if delay > 0 {
+		time.Sleep(delay)
+	}
+
+	target.InstallSnapshot(args, reply)
+	return sn.shouldDeliver(to, from)
+}
+

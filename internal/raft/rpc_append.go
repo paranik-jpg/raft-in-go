@@ -76,13 +76,23 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	// Case 3b: Receiver has entry at PrevLogIndex, but term mismatches
-	// ConflictTerm = log[PrevLogIndex].Term
-	// ConflictIndex = first index in follower log holding ConflictTerm
-	if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
-		reply.ConflictTerm = rf.log[args.PrevLogIndex].Term
+	// Check if PrevLogIndex is behind our compacted log base
+	if args.PrevLogIndex < rf.getFirstLogIndex() {
+		// Follower has already compacted past PrevLogIndex, meaning this entry was already committed
+		reply.ConflictTerm = 0
+		reply.ConflictIndex = rf.getFirstLogIndex() + 1
+		return
+	}
+
+	prevSliceIdx := rf.toSliceIndex(args.PrevLogIndex)
+	if rf.log[prevSliceIdx].Term != args.PrevLogTerm {
+		reply.ConflictTerm = rf.log[prevSliceIdx].Term
 		// Scan backward to find the earliest index for this conflicting term
-		for idx := args.PrevLogIndex; idx >= 1; idx-- {
-			if rf.log[idx].Term == reply.ConflictTerm {
+		baseIdx := rf.getFirstLogIndex()
+		// idx > baseIdx => Never run off the cliff into discarded memory!
+		for idx := args.PrevLogIndex; idx > baseIdx; idx-- {
+			sIdx := rf.toSliceIndex(idx)
+			if rf.log[sIdx].Term == reply.ConflictTerm {
 				reply.ConflictIndex = idx
 			} else {
 				break
@@ -98,12 +108,15 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	for i, entry := range args.Entries {
 		// EntryIndex => Index to start the matching from.
 		entryIndex := args.PrevLogIndex + 1 + i
-		// Below cond. => rf has something ahead!
+		if entryIndex <= rf.getFirstLogIndex() {
+			// Already snapshotted on follower, skip
+			continue
+		}
 		if entryIndex <= rf.getLastLogIndex() {
-			if rf.log[entryIndex].Term != entry.Term {
+			sIdx := rf.toSliceIndex(entryIndex)
+			if rf.log[sIdx].Term != entry.Term {
 				// Conflict detected: truncate log and append remaining entries
-				// rf.log[:entryIndex] => Keep index just before entryIndex.
-				rf.log = append(rf.log[:entryIndex], args.Entries[i:]...)
+				rf.log = append(rf.log[:sIdx], args.Entries[i:]...)
 				break
 			}
 			// Identical entry already in log; do not duplicate
@@ -148,7 +161,8 @@ func (rf *Raft) checkAndUpdateCommitIndex() {
 		// A leader cannot commit a log entry from an earlier term simply by counting replicas;
 		// it must commit an entry from its current term by counting replicas,
 		// which indirectly commits earlier entries.
-		if rf.log[N].Term != rf.currentTerm {
+		sliceN := rf.toSliceIndex(N)
+		if rf.log[sliceN].Term != rf.currentTerm {
 			continue
 		}
 
@@ -235,7 +249,8 @@ func (rf *Raft) sendHeartbeatRound() bool {
 				return
 			}
 			prevLogIndex := rf.nextIndex[p] - 1
-			prevLogTerm := rf.log[prevLogIndex].Term
+			prevSliceIdx := rf.toSliceIndex(prevLogIndex)
+			prevLogTerm := rf.log[prevSliceIdx].Term
 			rf.mu.Unlock()
 
 			args := &AppendEntriesArgs{
@@ -357,15 +372,26 @@ func (rf *Raft) sendHeartbeats() {
 				rf.mu.Unlock()
 				return
 			}
+
+			// If follower's nextIndex has fallen behind our earliest compacted entry (log[0].Index),
+			// the leader cannot send AppendEntries because those entries were already truncated.
+			// In accordance with Raft §7, leader must send an InstallSnapshot RPC instead!
+			if rf.nextIndex[p] <= rf.getFirstLogIndex() {
+				rf.sendInstallSnapshotToPeer(p)
+				return
+			}
+
 			prevLogIndex := rf.nextIndex[p] - 1
-			prevLogTerm := rf.log[prevLogIndex].Term
+			prevSliceIdx := rf.toSliceIndex(prevLogIndex)
+			prevLogTerm := rf.log[prevSliceIdx].Term
 
 			// Package any log entries from nextIndex[p] onwards
 			var entries []LogEntry
 			if rf.getLastLogIndex() >= rf.nextIndex[p] {
 				// The leader has new log entries that peer p has not received yet!
-				entries = make([]LogEntry, len(rf.log[rf.nextIndex[p]:]))
-				copy(entries, rf.log[rf.nextIndex[p]:])
+				startSliceIdx := rf.toSliceIndex(rf.nextIndex[p])
+				entries = make([]LogEntry, len(rf.log[startSliceIdx:]))
+				copy(entries, rf.log[startSliceIdx:])
 			}
 			rf.mu.Unlock()
 
@@ -418,8 +444,10 @@ func (rf *Raft) sendHeartbeats() {
 				} else {
 					// Term mismatch: search if leader has an entry with ConflictTerm
 					foundTerm := false
-					for idx := rf.getLastLogIndex(); idx >= 1; idx-- {
-						if rf.log[idx].Term == reply.ConflictTerm {
+					baseIdx := rf.getFirstLogIndex()
+					for idx := rf.getLastLogIndex(); idx > baseIdx; idx-- {
+						sIdx := rf.toSliceIndex(idx)
+						if rf.log[sIdx].Term == reply.ConflictTerm {
 							rf.nextIndex[p] = idx + 1
 							foundTerm = true
 							break

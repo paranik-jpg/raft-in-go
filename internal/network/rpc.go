@@ -39,3 +39,16 @@ type AppendEntriesReply struct {
 	ConflictTerm  int  // Term of the conflicting entry (0 if follower log is too short).
 }
 
+// InstallSnapshotArgs defines the arguments sent by the leader to install a snapshot on a lagging peer (§7).
+type InstallSnapshotArgs struct {
+	Term              int    // Leader's current term.
+	LeaderID          int    // Identifier of leader so follower can redirect clients.
+	LastIncludedIndex int    // The snapshot replaces all entries up through and including this index.
+	LastIncludedTerm  int    // Term of LastIncludedIndex.
+	Data              []byte // Raw snapshot bytes of the state machine.
+}
+
+// InstallSnapshotReply defines the response sent back by peers to the leader (§7).
+type InstallSnapshotReply struct {
+	Term int // CurrentTerm, for leader to update itself if obsolete.
+}

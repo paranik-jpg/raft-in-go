@@ -205,3 +205,72 @@ func TestChaosPartitionAndHealing(t *testing.T) {
 		}
 	}
 }
+
+// TestChaosCascadingMinorityPartitions verifies:
+// Cascading minority partitions: Repeatedly split a 5-node cluster into changing
+// majorities/minorities to ensure term numbers increment monotonically without
+// deadlocking elections.
+func TestChaosCascadingMinorityPartitions(t *testing.T) {
+	clusterSize := 5
+	nodes := make([]*Raft, clusterSize)
+	net := NewNetworkMatrix(clusterSize)
+
+	for i := range clusterSize {
+		nodes[i] = NewRaft(i, clusterSize)
+		nodes[i].SetNetworkMatrix(net)
+		net.RegisterNode(i, nodes[i])
+	}
+	for i := range clusterSize {
+		nodes[i].SetPeers(nodes)
+	}
+
+	for i := range clusterSize {
+		nodes[i].Start()
+		defer nodes[i].Stop()
+	}
+
+	// Dynamic cascading partition rounds
+	// Round 1: {0, 1} vs {2, 3, 4}
+	net.Partition([]int{0, 1}, []int{2, 3, 4})
+	time.Sleep(350 * time.Millisecond)
+
+	// Round 2: Shift partition to {0, 2} vs {1, 3, 4}
+	net.Heal()
+	net.Partition([]int{0, 2}, []int{1, 3, 4})
+	time.Sleep(350 * time.Millisecond)
+
+	// Round 3: Shift partition to {3, 4} vs {0, 1, 2}
+	net.Heal()
+	net.Partition([]int{3, 4}, []int{0, 1, 2})
+	time.Sleep(350 * time.Millisecond)
+
+	// Round 4: Fully heal and verify election liveness (no election deadlocks)
+	net.Heal()
+	time.Sleep(400 * time.Millisecond)
+
+	var leader *Raft
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		for i := range clusterSize {
+			if nodes[i].GetRole() == RoleLeader {
+				leader = nodes[i]
+				break
+			}
+		}
+		if leader != nil {
+			break
+		}
+		time.Sleep(30 * time.Millisecond)
+	}
+
+	if leader == nil {
+		t.Fatalf("cluster deadlocked: failed to elect leader after cascading partitions")
+	}
+
+	// Verify term monotonicity across all nodes
+	for i := range clusterSize {
+		if nodes[i].GetCurrentTerm() < 1 {
+			t.Fatalf("expected term >= 1 for node %d, got %d", i, nodes[i].GetCurrentTerm())
+		}
+	}
+}

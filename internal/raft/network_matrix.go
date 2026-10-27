@@ -191,3 +191,29 @@ func (nm *NetworkMatrix) CallAppendEntries(from, to int, args *AppendEntriesArgs
 	// Also check if reply packet is allowed to return back
 	return nm.shouldDeliver(to, from)
 }
+
+// CallInstallSnapshot intercepts and delivers an InstallSnapshot RPC through the network switch.
+func (nm *NetworkMatrix) CallInstallSnapshot(from, to int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) bool {
+	if !nm.shouldDeliver(from, to) {
+		return false
+	}
+
+	nm.mu.RLock()
+	delay := nm.delay
+	target := nm.nodes[to]
+	nm.mu.RUnlock()
+
+	if target == nil {
+		return false
+	}
+
+	if delay > 0 {
+		time.Sleep(delay)
+	}
+
+	target.InstallSnapshot(args, reply)
+
+	// Also check if reply packet is allowed to return back
+	return nm.shouldDeliver(to, from)
+}
+

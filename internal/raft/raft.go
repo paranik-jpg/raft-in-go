@@ -3,6 +3,8 @@ package raft
 import (
 	"sync"
 	"time"
+
+	"raft-go/internal/storage"
 )
 
 // Timer constants per Raft specification:
@@ -101,6 +103,9 @@ type Raft struct {
 	// netMatrix optionally intercepts RPCs for chaos and network partition simulation.
 	netMatrix *NetworkMatrix
 
+	// storage abstracts durable state and log persistence (§5.2, §7).
+	storage storage.Storage
+
 	// =========================================================================
 	// CONCURRENCY & LIFECYCLE CHANNELS
 	// =========================================================================
@@ -128,11 +133,19 @@ type Raft struct {
 }
 
 // ApplyMsg is the payload sent across applyCh to the state machine whenever
-// a log entry is safely committed by quorum.
+// a log entry is safely committed by quorum, or when a snapshot is installed.
 type ApplyMsg struct {
 	CommandValid bool // True if this message contains a normal replicated command.
 	Command      any  // Application-level command to apply to the state machine.
 	CommandIndex int  // 1-based log position where command was committed.
+
+	// Snapshot delivery fields (§7)
+	SnapshotValid bool // True if this message contains a raw state machine snapshot.
+	// -> True => The state machine calls Restore(msg.Snapshot)
+	// and fast-forwards its state to msg.SnapshotIndex.
+	Snapshot      []byte // Serialized state machine snapshot bytes.
+	SnapshotTerm  int    // Term of last entry included in snapshot.
+	SnapshotIndex int    // Index of last entry included in snapshot.
 }
 
 // =============================================================================
@@ -199,6 +212,12 @@ func (rf *Raft) StartCommand(command any) (int, int, bool) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
+	select {
+	case <-rf.stopCh:
+		return -1, -1, false
+	default:
+	}
+
 	if rf.role != RoleLeader {
 		return -1, -1, false
 	}
@@ -260,6 +279,20 @@ func (rf *Raft) SetNetworkMatrix(nm *NetworkMatrix) {
 	rf.netMatrix = nm
 }
 
+// GetStorage returns the storage engine instance (thread-safe).
+func (rf *Raft) GetStorage() storage.Storage {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	return rf.storage
+}
+
+// SetStorage configures a custom or persistent storage engine (e.g., during recovery testing).
+func (rf *Raft) SetStorage(s storage.Storage) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	rf.storage = s
+}
+
 // Stop safely shuts down the Raft node lifecycle loop.
 func (rf *Raft) Stop() {
 	rf.mu.Lock()
@@ -270,6 +303,7 @@ func (rf *Raft) Stop() {
 		return
 	default:
 		close(rf.stopCh)
+		rf.role = RoleFollower
 		// Wake up applyCond in case applyLoop is waiting so it can exit cleanly
 		if rf.applyCond != nil {
 			rf.applyCond.Broadcast()
@@ -312,8 +346,10 @@ func (rf *Raft) applyLoop() {
 		// Snapshot committed entries that need to be applied
 		start := rf.lastApplied + 1
 		end := rf.commitIndex
+		startSlice := rf.toSliceIndex(start)
+		endSlice := rf.toSliceIndex(end)
 		entriesToApply := make([]LogEntry, end-start+1)
-		copy(entriesToApply, rf.log[start:end+1])
+		copy(entriesToApply, rf.log[startSlice:endSlice+1])
 
 		// Update lastApplied before unlocking
 		rf.lastApplied = end
@@ -369,6 +405,7 @@ func NewRaft(me int, peersCount int, applyCh ...chan ApplyMsg) *Raft {
 		grantVoteCh:   make(chan struct{}, 1),
 		winElectionCh: make(chan struct{}, 1),
 		applyCh:       ch,
+		storage:       storage.NewMemoryStorage(),
 		log: []LogEntry{
 			{
 				Index:   0,
