@@ -327,6 +327,7 @@ func (rf *Raft) applyLoop() {
 
 		// Sleep while no entries are ready to apply and node is not stopped
 		for rf.commitIndex <= rf.lastApplied {
+			// No work!
 			select {
 			case <-rf.stopCh:
 				rf.mu.Unlock()
@@ -345,6 +346,7 @@ func (rf *Raft) applyLoop() {
 
 		// Snapshot committed entries that need to be applied
 		start := rf.lastApplied + 1
+		// New entries committed!
 		end := rf.commitIndex
 		startSlice := rf.toSliceIndex(start)
 		endSlice := rf.toSliceIndex(end)

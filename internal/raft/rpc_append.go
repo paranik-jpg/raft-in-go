@@ -322,6 +322,7 @@ func (rf *Raft) ReadIndex() (int, bool) {
 
 	// Step 2: Send immediate heartbeat round and await majority confirmation
 	if !rf.sendHeartbeatRound() {
+		// Partitioned Zombie Leader!
 		return 0, false
 	}
 
@@ -349,6 +350,7 @@ func (rf *Raft) ReadIndex() (int, bool) {
 
 // sendHeartbeats broadcasts an immediate empty AppendEntries RPC to all peers.
 // Suppresses competing candidates and asserts leadership.
+// AppendEntries responses are also handled here in this function!
 func (rf *Raft) sendHeartbeats() {
 	rf.mu.Lock()
 	if rf.role != RoleLeader {
@@ -436,6 +438,7 @@ func (rf *Raft) sendHeartbeats() {
 
 				// Check if this new replication allows advancing commitIndex (§5.3, §5.4.2)
 				rf.checkAndUpdateCommitIndex()
+				// Leader receives reply.Success == false!
 			} else {
 				// Consistency check failed: use fast recovery hints to update nextIndex
 				if reply.ConflictTerm == 0 {

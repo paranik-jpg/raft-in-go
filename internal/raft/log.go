@@ -56,7 +56,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	lastIncludedTerm := rf.log[sliceIdx].Term
 
 	// Create compacted log slice with new sentinel at index 0
-	// Length = 0, Cap = len(...
+	// Length = 0, Capacity = len(...
 	newLog := make([]LogEntry, 0, len(rf.log)-sliceIdx)
 	// New sentinal
 	newLog = append(newLog, LogEntry{

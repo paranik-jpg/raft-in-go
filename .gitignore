@@ -23,7 +23,7 @@ profile.out
 # Windows WSL / Zone Identifier artifacts
 *Zone.Identifier
 raft.pdf
+Local PostgreSQL.session.sql
 
 # Go workspace
 go.work
-

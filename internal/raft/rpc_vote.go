@@ -175,4 +175,3 @@ func (rf *Raft) startElection() {
 		}(peer)
 	}
 }
-
