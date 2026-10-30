@@ -58,6 +58,7 @@ func (ck *Clerk) Get(key string) string {
 
 		if reply.Err == OK {
 			ck.mu.Lock()
+			// Our chosen leader was correct!
 			ck.leaderID = leader
 			ck.mu.Unlock()
 			return reply.Value
@@ -65,13 +66,17 @@ func (ck *Clerk) Get(key string) string {
 
 		if reply.Err == ErrNoKey {
 			ck.mu.Lock()
+			// Our chosen leader was correct!
 			ck.leaderID = leader
 			ck.mu.Unlock()
 			return ""
 		}
 
 		// ErrWrongLeader, ErrTimeout, or ErrServerStopped: try next server in cluster
+		// Will next be the leader ? 🤔
 		leader = (leader + 1) % len(servers)
+
+		// Wait a little, don't overwhelm the server!!!
 		time.Sleep(10 * time.Millisecond)
 	}
 }
@@ -123,7 +128,6 @@ func (ck *Clerk) GetLocal(key string) string {
 	val, _ := servers[leader].GetLocal(key)
 	return val
 }
-
 
 // Put sets the value for a key in the replicated state machine.
 func (ck *Clerk) Put(key string, value string) {
