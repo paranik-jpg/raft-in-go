@@ -84,8 +84,7 @@ func runWriteBenchmark(clusterSize int, numClients int, writesPerClient int) Ben
 }
 
 // MeasureFailoverConvergence quantifies failover speed:
-// Measures the exact duration (in milliseconds) from issuing a SIGKILL (Kill/Stop)
-// to the active leader until the first successful client write is committed
+// Measures the exact duration (in milliseconds) from issuing a SIGKILL (Kill/Stop) to the active leader until the first successful client write is committed
 // by the newly elected leader.
 func MeasureFailoverConvergence(clusterSize int) (time.Duration, error) {
 	servers, rafts, cleanup := setupCluster(&testing.T{}, clusterSize, -1)
@@ -114,8 +113,7 @@ func MeasureFailoverConvergence(clusterSize int) (time.Duration, error) {
 	rafts[leaderID].Stop()
 
 	// Step 4: Issue a client write through the Clerk.
-	// The Clerk will encounter ErrWrongLeader / timeout against the dead leader,
-	// iterate to other peers, wait for the follower timeout (150ms-300ms),
+	// The Clerk will encounter ErrWrongLeader / timeout against the dead leader, iterate to other peers, wait for the follower timeout (150ms-300ms),
 	// elect a new leader, and commit the write.
 	ck.Put("failover_probe_key", "committed_by_new_leader")
 	failoverDuration := time.Since(killTime)
@@ -168,8 +166,7 @@ func TestEmpiricalEvaluation(t *testing.T) {
 	fmt.Println("================================================================================")
 }
 
-// benchReadOverhead measures throughput and latency differences between naive local reads
-// vs. verified linearizable reads (ReadIndex with heartbeat quorum roundtrips).
+// benchReadOverhead measures throughput and latency differences between naive local reads vs. verified linearizable reads (ReadIndex with heartbeat quorum roundtrips).
 func benchReadOverhead(clusterSize int, totalReads int) {
 	servers, _, cleanup := setupCluster(&testing.T{}, clusterSize, -1)
 	defer cleanup()
