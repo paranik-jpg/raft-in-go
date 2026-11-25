@@ -6,15 +6,14 @@ import (
 	"time"
 )
 
-// RPCEndpoint represents a callable Raft node endpoint capable of handling
-// RequestVote, AppendEntries, and InstallSnapshot RPC calls.
+// RPCEndpoint represents a callable Raft node endpoint capable of handling RequestVote, AppendEntries, and InstallSnapshot RPC calls.
 type RPCEndpoint interface {
 	RequestVote(args *RequestVoteArgs, reply *RequestVoteReply)
 	AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply)
 	InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply)
 }
 
-// NetworkSwitch is the simulated network switch interface supporting chaos injection.
+// NetworkSwitch is a simulated network switch that supports injecting network failures and disruptions.
 type NetworkSwitch interface {
 	CanCommunicate(from, to int) bool
 	Partition(groupA, groupB []int)
