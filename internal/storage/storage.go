@@ -5,8 +5,7 @@ import (
 )
 
 // StateMachine defines the serialization contract for applications running atop Raft (§7).
-// Allows the replicated state store (e.g. KV-Store) to snapshot its in-memory data
-// and restore from snapshots during compaction or node recovery.
+// Allows the replicated state store (e.g. KV-Store) to snapshot its in-memory data and restore from snapshots during compaction or node recovery.
 type StateMachine interface {
 	// Snapshot serializes the current point-in-time state machine data into bytes.
 	// The consensus engine call this method periodically!
