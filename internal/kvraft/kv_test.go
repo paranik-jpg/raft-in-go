@@ -90,8 +90,7 @@ func TestKVClerkBasicPutAppendGet(t *testing.T) {
 	}
 }
 
-// TestKVContinuousCompaction verifies that continuous log compaction every 5 entries
-// truncates historical entries without corrupting ongoing client operations.
+// TestKVContinuousCompaction verifies that continuous log compaction every 5 entries truncates historical entries without corrupting ongoing client operations.
 func TestKVContinuousCompaction(t *testing.T) {
 	servers, _, cleanup := setupCluster(t, 3, 5)
 	defer cleanup()
