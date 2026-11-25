@@ -23,8 +23,8 @@ type BenchmarkResults struct {
 }
 
 func (r BenchmarkResults) String() string {
-	return fmt.Sprintf("Cluster Size: %d | Total Writes: %d in %v | Throughput: %.2f writes/sec | p50: %v | p95: %v | p99: %v",
-		r.ClusterSize, r.TotalWrites, r.Duration, r.Throughput, r.MedianLatency, r.P95Latency, r.P99Latency)
+	return fmt.Sprintf("Cluster Size: %d | Total Writes: %d in %v | Throughput: %.2f writes/sec | p50: %v | p95: %v | p99: %v", 
+					    r.ClusterSize, r.TotalWrites, r.Duration, r.Throughput, r.MedianLatency, r.P95Latency, r.P99Latency)
 }
 
 // runWriteBenchmark executes concurrent client Put/Append operations across a cluster of given size.
@@ -193,11 +193,8 @@ func benchReadOverhead(clusterSize int, totalReads int) {
 	tpLin := float64(totalReads) / durLin.Seconds()
 	avgLin := durLin / time.Duration(totalReads)
 
-	fmt.Printf("Naive Local Reads        => %d reads in %v | Throughput: %10.2f reads/sec | Avg Latency: %v\n",
-		totalReads, durLocal, tpLocal, avgLocal)
-	fmt.Printf("Linearizable (ReadIndex) => %d reads in %v | Throughput: %10.2f reads/sec | Avg Latency: %v\n",
-		totalReads, durLin, tpLin, avgLin)
-	fmt.Printf("Consensus Safety Tax     => Local is %.2fx faster than quorum-verified linearizable reads\n",
-		tpLocal/tpLin)
+	fmt.Printf("Naive Local Reads        => %d reads in %v | Throughput: %10.2f reads/sec | Avg Latency: %v\n", totalReads, durLocal, tpLocal, avgLocal)
+	fmt.Printf("Linearizable (ReadIndex) => %d reads in %v | Throughput: %10.2f reads/sec | Avg Latency: %v\n", totalReads, durLin, tpLin, avgLin)
+	fmt.Printf("Consensus Safety Tax     => Local is %.2fx faster than quorum-verified linearizable reads\n", tpLocal/tpLin)
 }
 
