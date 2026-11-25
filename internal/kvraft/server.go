@@ -23,16 +23,16 @@ type KVServer struct {
 	applyCh      chan raft.ApplyMsg
 	dead         bool
 	stopCh       chan struct{}
-	maxRaftState int // Snapshot when log state exceeds this (in bytes or count, -1 to disable)
+	maxRaftState int  // Snapshot! when log state exceeds this (in bytes or count, -1 to disable)
 
-	// In-memory key-value state store
-	kvStore map[string]string // The actual database
+	// In-memory key-value state store (The actual database)
+	kvStore map[string]string 
 
 	// Duplicate request detection table: clientID -> last applied SeqNumber
 	lastAppliedSeq map[int64]int64
 
-	// Waiting client notification channels: log index -> chan OpResult
-	notifyCh map[int]chan OpResult // Wakes up waiting client RPC goroutines: logIndex -> channel
+	// Wakes up waiting client RPC goroutines: logIndex -> channel
+	notifyCh map[int]chan OpResult 
 }
 
 // NewKVServer initializes a new replicated key-value server node.
@@ -50,8 +50,7 @@ func NewKVServer(me int, rf *raft.Raft, applyCh chan raft.ApplyMsg, maxRaftState
 		notifyCh:       make(map[int]chan OpResult),
 	}
 
-	// If Raft storage already contains a snapshot (e.g. node restart / crash recovery),
-	// restore the state machine immediately upon initialization!
+	// If Raft storage already contains a snapshot (e.g. node restart / crash recovery), restore the state machine immediately upon initialization!
 	if rf != nil && rf.GetStorage() != nil {
 		snapData, _, _, err := rf.GetStorage().ReadSnapshot()
 		if err == nil && len(snapData) > 0 {
@@ -104,8 +103,8 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 }
 
 // GetLinearizable executes a verified linearizable read using the Raft ReadIndex protocol (§8).
-// Instead of writing a dummy OpGet into the replicated log, the leader verifies its leadership
-// authority via an immediate heartbeat round trip with the majority and waits until lastApplied >= readIndex.
+// Instead of writing a dummy OpGet into the replicated log, the leader verifies its leadership authority via an immediate heartbeat round trip with the majority 
+// and waits until lastApplied >= readIndex.
 func (kv *KVServer) GetLinearizable(args *GetArgs, reply *GetReply) {
 	_, ok := kv.rf.ReadIndex()
 	if !ok {
@@ -242,7 +241,7 @@ func (kv *KVServer) applierLoop() {
 
 			// Snapshot trigger if maxRaftState threshold is set
 			if kv.maxRaftState > 0 && msg.CommandIndex%kv.maxRaftState == 0 {
-				// Freeze the current point-in-time state:
+				// Freeze the current point-in-time state!
 				snapData := kv.encodeSnapshot()
 				// Hand snapData down to Raft
 				kv.rf.Snapshot(msg.CommandIndex, snapData)
@@ -258,8 +257,7 @@ func (kv *KVServer) applierLoop() {
 func (kv *KVServer) encodeSnapshot() []byte {
 	// w => a clean byte bucket.
 	w := new(bytes.Buffer)
-	// Whatever we pass to e.Encode(...) will be serialized into compact binary bytes
-	// and pushed directly into w
+	// Whatever we pass to e.Encode(...) will be serialized into compact binary bytes and pushed directly into w
 	e := gob.NewEncoder(w)
 	_ = e.Encode(kv.kvStore)
 	_ = e.Encode(kv.lastAppliedSeq)
