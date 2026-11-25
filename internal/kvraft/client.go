@@ -9,8 +9,7 @@ import (
 )
 
 // Clerk represents an RPC client communicating with the distributed KVServer cluster.
-// It enforces linearizable at-most-once semantics by attaching a unique (ClientID, SeqNumber)
-// to every request and automatically retrying across server re-elections.
+// It guarantees each request is processed at most once by assigning it a unique (ClientID, SeqNumber) and automatically retrying if servers change.
 type Clerk struct {
 	mu        sync.Mutex
 	servers   []*KVServer
