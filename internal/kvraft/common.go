@@ -22,11 +22,11 @@ const (
 
 // Op is the replicated command payload stored in Raft logs.
 type Op struct {
-	Type      OpType // Put, Append, Get
-	Key       string // Key to mutate or read
-	Value     string // Value for Put/Append (empty for Get)
-	ClientID  int64  // Unique client identifier for linearizability
-	SeqNumber int64  // Monotonically increasing per-client request sequence number
+	Type      OpType  // Put, Append, Get
+	Key       string  // Key to mutate or read
+	Value     string  // Value for Put/Append (empty for Get)
+	ClientID  int64   // Unique client identifier for linearizability
+	SeqNumber int64   // Monotonically increasing per-client request sequence number
 }
 
 // PutAppendArgs defines arguments sent by the client Clerk for Put and Append.
